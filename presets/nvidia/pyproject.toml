@@ -1,0 +1,14 @@
+[project]
+name = "nanobot-preset-nvidia"
+version = "0.1.0"
+description = "NVIDIA NIM deployment preset for nanobot"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["nanobot-ai"]
+
+[project.entry-points."nanobot.presets"]
+nvidia = "nanobot_preset_nvidia:NvidiaPreset"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
