@@ -3,7 +3,7 @@
 import json
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -266,3 +266,17 @@ class SessionManager:
                 continue
 
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+    def evict_idle(self, max_idle_s: float = 1800) -> int:
+        """Remove sessions idle for more than *max_idle_s* from the in-memory cache.
+
+        On-disk session files are NOT deleted — the next ``get_or_create``
+        will reload from JSONL.  Returns the number of evicted entries.
+        """
+        cutoff = datetime.now() - timedelta(seconds=max_idle_s)
+        stale = [k for k, s in self._cache.items() if s.updated_at < cutoff]
+        for k in stale:
+            del self._cache[k]
+        if stale:
+            logger.info("Evicted {} idle sessions from cache", len(stale))
+        return len(stale)

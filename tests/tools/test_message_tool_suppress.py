@@ -118,15 +118,69 @@ class TestMessageToolSuppressLogic:
 
 class TestMessageToolTurnTracking:
 
-    def test_sent_in_turn_tracks_same_target(self) -> None:
-        tool = MessageTool()
-        tool.set_context("feishu", "chat1")
-        assert not tool._sent_in_turn
-        tool._sent_in_turn = True
-        assert tool._sent_in_turn
+    def test_turn_state_tracks_sent(self) -> None:
+        from nanobot.agent.routing import TurnState, tool_routing, turn_state
+        tool_routing.set(("feishu", "chat1", None))
+        state = TurnState()
+        turn_state.set(state)
+        assert not state.sent
+        state.sent = True
+        assert turn_state.get().sent
 
-    def test_start_turn_resets(self) -> None:
-        tool = MessageTool()
-        tool._sent_in_turn = True
-        tool.start_turn()
-        assert not tool._sent_in_turn
+    def test_turn_state_resets_on_new_turn(self) -> None:
+        from nanobot.agent.routing import TurnState, turn_state
+        old = TurnState()
+        old.sent = True
+        turn_state.set(old)
+        new = TurnState()
+        turn_state.set(new)
+        assert not turn_state.get().sent
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tasks_isolated(self) -> None:
+        """Two asyncio tasks with different routing don't interfere."""
+        import asyncio
+        from nanobot.agent.routing import TurnState, tool_routing, turn_state
+
+        results: dict[str, tuple[str, str, bool]] = {}
+
+        async def task_a():
+            tool_routing.set(("slack", "chan_a", None))
+            state = TurnState()
+            turn_state.set(state)
+            await asyncio.sleep(0.01)  # yield to let task_b run
+            ch, cid, _ = tool_routing.get()
+            state.sent = True
+            results["a"] = (ch, cid, turn_state.get().sent)
+
+        async def task_b():
+            tool_routing.set(("teams", "chan_b", None))
+            state = TurnState()
+            turn_state.set(state)
+            state.sent = True
+            await asyncio.sleep(0.01)  # yield to let task_a run
+            ch, cid, _ = tool_routing.get()
+            results["b"] = (ch, cid, turn_state.get().sent)
+
+        await asyncio.gather(
+            asyncio.create_task(task_a()),
+            asyncio.create_task(task_b()),
+        )
+
+        assert results["a"] == ("slack", "chan_a", True)
+        assert results["b"] == ("teams", "chan_b", True)
+
+    @pytest.mark.asyncio
+    async def test_turn_state_visible_across_gather(self) -> None:
+        """TurnState mutations in asyncio.gather child tasks are visible to parent."""
+        import asyncio
+        from nanobot.agent.routing import TurnState, turn_state
+
+        state = TurnState()
+        turn_state.set(state)
+
+        async def child():
+            turn_state.get().sent = True
+
+        await asyncio.gather(asyncio.create_task(child()))
+        assert state.sent is True

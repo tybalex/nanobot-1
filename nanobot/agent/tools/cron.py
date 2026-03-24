@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
+from nanobot.agent.routing import tool_routing
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJobState, CronSchedule
@@ -14,14 +15,7 @@ class CronTool(Tool):
 
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
-        self._channel = ""
-        self._chat_id = ""
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
-
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
-        self._channel = channel
-        self._chat_id = chat_id
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -100,9 +94,10 @@ class CronTool(Tool):
         tz: str | None,
         at: str | None,
     ) -> str:
+        channel, chat_id, _ = tool_routing.get()
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
@@ -138,8 +133,8 @@ class CronTool(Tool):
             schedule=schedule,
             message=message,
             deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
+            channel=channel,
+            to=chat_id,
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"

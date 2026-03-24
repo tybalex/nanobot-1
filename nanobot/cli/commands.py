@@ -327,13 +327,29 @@ def onboard(
 
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
-    if wizard:
-        console.print(f"  1. Chat: [cyan]{agent_cmd}[/cyan]")
-        console.print(f"  2. Start gateway: [cyan]{gateway_cmd}[/cyan]")
-    else:
-        console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
-        console.print("     Get one at: https://openrouter.ai/keys")
-        console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
+
+    # Let a deployment preset plugin provide custom next-steps text.
+    preset_handled = False
+    try:
+        from nanobot.presets.registry import get_active_preset
+
+        preset = get_active_preset()
+        if preset:
+            preset_handled = preset.onboard_next_steps(
+                console, str(config_path), wizard=wizard
+            )
+    except Exception:
+        pass
+
+    if not preset_handled:
+        if wizard:
+            console.print(f"  1. Chat: [cyan]{agent_cmd}[/cyan]")
+            console.print(f"  2. Start gateway: [cyan]{gateway_cmd}[/cyan]")
+        else:
+            console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
+            console.print("     Get one at: https://openrouter.ai/keys")
+            console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
+
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
 
 
@@ -555,7 +571,6 @@ def gateway(
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         from nanobot.agent.tools.cron import CronTool
-        from nanobot.agent.tools.message import MessageTool
         from nanobot.utils.evaluator import evaluate_response
 
         reminder_note = (
@@ -581,8 +596,8 @@ def gateway(
 
         response = resp.content if resp else ""
 
-        message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+        from nanobot.agent.routing import TurnState, turn_state
+        if turn_state.get(TurnState()).sent:
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -604,8 +619,11 @@ def gateway(
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
+        # Use explicitly configured target if set.
+        if hb_cfg.notify_channel and hb_cfg.notify_chat_id:
+            return hb_cfg.notify_channel, hb_cfg.notify_chat_id
+        # Fall back to the most recently updated non-internal session on an enabled channel.
         enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
@@ -615,7 +633,6 @@ def gateway(
                 continue
             if channel in enabled and chat_id:
                 return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
         return "cli", "direct"
 
     # Create heartbeat service
