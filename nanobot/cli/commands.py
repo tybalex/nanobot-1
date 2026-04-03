@@ -508,6 +508,186 @@ def _migrate_cron_store(config: "Config") -> None:
 
 
 # ============================================================================
+# Deploy — provision a new digital employee instance
+# ============================================================================
+
+
+@app.command()
+def deploy(
+    workspace: str = typer.Option(..., "--workspace", "-w", help="Workspace directory for this instance (must be unique per instance)"),
+    template: str = typer.Option("general", "--template", "-t", help="Agent template: general, tpm, dev-lead, product-manager"),
+    name: str = typer.Option("", "--name", "-n", help="Display name for the agent (used in SOUL.md)"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file (shared or per-instance)"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override default LLM model"),
+    concurrency: int = typer.Option(10, "--concurrency", help="Max concurrent requests (NANOBOT_MAX_CONCURRENT_REQUESTS)"),
+    heartbeat_channel: str = typer.Option("", "--heartbeat-channel", help="Channel for heartbeat notifications (e.g. 'slack')"),
+    heartbeat_chat_id: str = typer.Option("", "--heartbeat-chat-id", help="Chat ID for heartbeat notifications"),
+    slack_bot_token: str = typer.Option("", "--slack-bot-token", help="Slack bot token (xoxb-...)"),
+    slack_app_token: str = typer.Option("", "--slack-app-token", help="Slack app-level token (xapp-...)"),
+    slack_group_policy: str = typer.Option("mention", "--slack-group-policy", help="Slack group policy: mention, open, allowlist"),
+    teams_app_id: str = typer.Option("", "--teams-app-id", help="Teams Bot app ID from Azure"),
+    teams_app_password: str = typer.Option("", "--teams-app-password", help="Teams Bot client secret from Azure"),
+    teams_tenant_id: str = typer.Option("", "--teams-tenant-id", help="Azure AD tenant ID"),
+    teams_port: int = typer.Option(3978, "--teams-port", help="Port for Teams webhook endpoint"),
+    teams_group_policy: str = typer.Option("mention", "--teams-group-policy", help="Teams group policy: mention, open"),
+):
+    """Provision a new digital employee instance.
+
+    Creates a workspace directory with the chosen agent template, copies SOUL.md,
+    configures channels, and prints the gateway command to start the instance.
+
+    Examples:
+
+        # Deploy a TPM agent connected to Slack
+        nanobot deploy -w ~/agents/tpm-agent -t tpm -n "PM Bot" \\
+            --slack-bot-token xoxb-... --slack-app-token xapp-...
+
+        # Deploy a dev agent connected to Teams
+        nanobot deploy -w ~/agents/dev-agent -t dev-lead -n "Dev Agent" \\
+            --teams-app-id 116168b7-... --teams-app-password secret \\
+            --teams-tenant-id 43083d15-...
+
+        # Deploy with both Slack and Teams
+        nanobot deploy -w ~/agents/team-bot -t general -n "Team Bot" \\
+            --slack-bot-token xoxb-... --slack-app-token xapp-... \\
+            --teams-app-id 116168b7-... --teams-app-password secret \\
+            --teams-tenant-id 43083d15-...
+
+        # Start the deployed instance
+        nanobot gateway -w ~/agents/tpm-agent -c ~/agents/tpm-agent/config.json
+    """
+    import shutil
+    from nanobot.config.loader import load_config, save_config, set_config_path
+
+    workspace_path = Path(workspace).expanduser().resolve()
+
+    # Validate template — look inside the installed nanobot package
+    from importlib.resources import files as pkg_files
+    try:
+        templates_root = Path(str(pkg_files("nanobot") / "templates" / "team-agent"))
+    except Exception:
+        templates_root = Path(__file__).parent.parent / "templates" / "team-agent"
+    available = sorted(d.name for d in templates_root.iterdir() if d.is_dir()) if templates_root.is_dir() else []
+    if template not in available:
+        console.print(f"[red]Unknown template: '{template}'[/red]")
+        if available:
+            console.print(f"  Available: {', '.join(available)}")
+        raise typer.Exit(1)
+
+    template_dir = templates_root / template
+
+    # Create workspace
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    console.print(f"[green]✓[/green] Workspace: {workspace_path}")
+
+    # Sync default workspace files (AGENTS.md, TOOLS.md, memory/, skills/)
+    sync_workspace_templates(workspace_path, silent=True)
+
+    # Copy template SOUL.md (overwrite default)
+    soul_src = template_dir / "SOUL.md"
+    if soul_src.exists():
+        soul_content = soul_src.read_text(encoding="utf-8")
+        if name:
+            # Inject the agent name into the first line if provided
+            soul_content = soul_content.replace("# Technical Program Manager", f"# {name} — Technical Program Manager", 1)
+            soul_content = soul_content.replace("# Dev Team Lead", f"# {name} — Dev Team Lead", 1)
+            soul_content = soul_content.replace("# Product Manager", f"# {name} — Product Manager", 1)
+            soul_content = soul_content.replace("# General Team Assistant", f"# {name} — General Team Assistant", 1)
+        (workspace_path / "SOUL.md").write_text(soul_content, encoding="utf-8")
+        console.print(f"[green]✓[/green] Template: {template} ({soul_src.name})")
+
+    # Copy any additional template files (future: AGENTS.md overrides, skills, etc.)
+    for f in template_dir.iterdir():
+        if f.name != "SOUL.md" and f.is_file():
+            shutil.copy2(f, workspace_path / f.name)
+
+    # Handle config
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        set_config_path(config_path)
+        loaded = load_config(config_path)
+    else:
+        # Create per-instance config next to workspace
+        config_path = workspace_path / "config.json"
+        if config_path.exists():
+            loaded = load_config(config_path)
+        else:
+            loaded = Config()
+
+    # Apply overrides
+    loaded.agents.defaults.workspace = str(workspace_path)
+    if model:
+        loaded.agents.defaults.model = model
+    if heartbeat_channel:
+        loaded.gateway.heartbeat.notify_channel = heartbeat_channel
+    if heartbeat_chat_id:
+        loaded.gateway.heartbeat.notify_chat_id = heartbeat_chat_id
+
+    # Configure Slack channel if tokens provided
+    if slack_bot_token and slack_app_token:
+        # ChannelsConfig uses extra="allow" — set slack config directly
+        slack_cfg = {
+            "enabled": True,
+            "botToken": slack_bot_token,
+            "appToken": slack_app_token,
+            "groupPolicy": slack_group_policy,
+            "replyInThread": True,
+            "allowFrom": ["*"],
+        }
+        if not hasattr(loaded, "channels") or loaded.channels is None:
+            from nanobot.config.schema import ChannelsConfig
+            loaded.channels = ChannelsConfig()
+        loaded.channels.__dict__["slack"] = slack_cfg
+        # Also set extra fields via pydantic's model
+        loaded.channels.model_extra["slack"] = slack_cfg
+        console.print(f"[green]✓[/green] Slack: configured (group_policy={slack_group_policy})")
+    elif slack_bot_token or slack_app_token:
+        console.print("[yellow]Warning: Both --slack-bot-token and --slack-app-token are required for Slack[/yellow]")
+
+    # Configure Teams channel if credentials provided
+    if teams_app_id and teams_app_password:
+        teams_cfg = {
+            "enabled": True,
+            "appId": teams_app_id,
+            "appPassword": teams_app_password,
+            "tenantId": teams_tenant_id,
+            "port": teams_port,
+            "groupPolicy": teams_group_policy,
+            "replyInThread": True,
+            "allowFrom": ["*"],
+        }
+        if not hasattr(loaded, "channels") or loaded.channels is None:
+            from nanobot.config.schema import ChannelsConfig
+            loaded.channels = ChannelsConfig()
+        loaded.channels.__dict__["teams"] = teams_cfg
+        loaded.channels.model_extra["teams"] = teams_cfg
+        console.print(f"[green]✓[/green] Teams: configured (port={teams_port}, group_policy={teams_group_policy})")
+    elif teams_app_id or teams_app_password:
+        console.print("[yellow]Warning: Both --teams-app-id and --teams-app-password are required for Teams[/yellow]")
+
+    # Save per-instance config
+    instance_config_path = workspace_path / "config.json"
+    save_config(loaded, instance_config_path)
+    console.print(f"[green]✓[/green] Config: {instance_config_path}")
+
+    if name:
+        console.print(f"[green]✓[/green] Name: {name}")
+
+    # Print launch command
+    console.print()
+    console.print("[bold]To start this instance:[/bold]")
+    env_prefix = f"NANOBOT_MAX_CONCURRENT_REQUESTS={concurrency} " if concurrency != 3 else ""
+    console.print(f"  {env_prefix}nanobot gateway -w {workspace_path} -c {instance_config_path}")
+    console.print()
+
+    # Print multi-instance hint
+    console.print("[dim]To run multiple instances, deploy each to a separate workspace:[/dim]")
+    console.print(f"  [dim]nanobot deploy -w ~/agents/tpm -t tpm -n \"TPM Bot\"[/dim]")
+    console.print(f"  [dim]nanobot deploy -w ~/agents/dev -t dev-lead -n \"Dev Lead\"[/dim]")
+    console.print(f"  [dim]Then start each in a separate terminal or process manager.[/dim]")
+
+
+# ============================================================================
 # Gateway / Server
 # ============================================================================
 

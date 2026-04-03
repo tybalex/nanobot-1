@@ -146,6 +146,28 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        self._register_channel_tools()
+
+    def _register_channel_tools(self) -> None:
+        """Register tools for enabled channels (e.g. Slack history tools)."""
+        if not self.channels_config:
+            return
+        slack_cfg = getattr(self.channels_config, "slack", None)
+        if slack_cfg is None:
+            slack_cfg = self.channels_config.model_extra.get("slack")
+        if slack_cfg:
+            bot_token = slack_cfg.get("botToken", "") if isinstance(slack_cfg, dict) else getattr(slack_cfg, "bot_token", "")
+            enabled = slack_cfg.get("enabled", False) if isinstance(slack_cfg, dict) else getattr(slack_cfg, "enabled", False)
+            if enabled and bot_token:
+                from nanobot.agent.tools.slack_tools import (
+                    SlackListChannelsTool,
+                    SlackReadHistoryTool,
+                    SlackReadThreadTool,
+                )
+                self.tools.register(SlackListChannelsTool(bot_token))
+                self.tools.register(SlackReadHistoryTool(bot_token))
+                self.tools.register(SlackReadThreadTool(bot_token))
+                logger.info("Slack history tools registered")
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
